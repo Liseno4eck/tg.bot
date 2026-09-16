@@ -1,19 +1,14 @@
 import logging
-import os
 
-from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, ContextTypes, TypeHandler
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = "8280076573:AAFknR_2qMrJb89lYr0vMbLi48aruYWNx3Q"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-
 
 async def business_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     connection = update.business_connection
@@ -30,20 +25,16 @@ async def business_connection(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             logging.exception("Не удалось отправить уведомление владельцу.")
 
-
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("В .env не указан BOT_TOKEN")
+    if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СЮДА_ТОКЕН_БОТА":
+        raise RuntimeError("Вставь токен бота в переменную BOT_TOKEN")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Единственное событие, которое обрабатывает этот бот:
-    # подключение Telegram Business.
     app.add_handler(TypeHandler(Update, business_connection))
 
     logging.info("Ожидание подключения через Telegram Business...")
     app.run_polling(allowed_updates=["business_connection"])
-
 
 if __name__ == "__main__":
     main()

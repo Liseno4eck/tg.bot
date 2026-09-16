@@ -1,11 +1,7 @@
 import logging
 import uuid
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     ContextTypes,
@@ -26,44 +22,43 @@ logging.basicConfig(
 games = {}
 
 
-def empty_board():
+def create_board():
     return [""] * 9
 
 
-def board_keyboard(game_id):
+def make_keyboard(game_id):
     game = games[game_id]
     board = game["board"]
 
     keyboard = []
 
     for row in range(3):
-        buttons = []
+        line = []
 
         for col in range(3):
             index = row * 3 + col
-            value = board[index]
 
-            if value == "X":
-                text = "❌"
-            elif value == "O":
-                text = "⭕"
+            if board[index] == "X":
+                symbol = "❌"
+            elif board[index] == "O":
+                symbol = "⭕"
             else:
-                text = "　"
+                symbol = "⬜"
 
-            buttons.append(
+            line.append(
                 InlineKeyboardButton(
-                    text,
+                    symbol,
                     callback_data=f"xox:{game_id}:{index}"
                 )
             )
 
-        keyboard.append(buttons)
+        keyboard.append(line)
 
     if game["finished"]:
         keyboard.append([
             InlineKeyboardButton(
                 "🔄 Новая игра",
-                callback_data=f"xoxnew:{game_id}"
+                callback_data=f"newxox:{game_id}"
             )
         ])
 
@@ -92,7 +87,7 @@ def check_winner(board):
     return None
 
 
-def player_name(user):
+def get_user_name(user):
     if user.username:
         return f"@{user.username}"
 
@@ -102,67 +97,105 @@ def player_name(user):
     return str(user.id)
 
 
-async def send_xox_game(
-    bot,
-    chat_id,
-    business_connection_id=None,
-):
-    game_id = uuid.uuid4().hex[:12]
+def game_text(game):
+    if len(game["players"]) == 0:
+        return (
+            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
+            "Нажмите на любую клетку, чтобы присоединиться.\n\n"
+            "❌ Первый игрок\n"
+            "⭕ Второй игрок"
+        )
 
-    games[game_id] = {
-        "board": empty_board(),
-        "players": {},
-        "turn": None,
-        "finished": False,
-        "chat_id": chat_id,
-        "business_connection_id": business_connection_id,
-        "message_id": None,
-    }
+    if len(game["players"]) == 1:
+        player = next(iter(game["players"].values()))
 
-    text = (
+        return (
+            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
+            f"Игрок {player} подключился.\n"
+            "Ждём второго игрока..."
+        )
+
+    if game["finished"]:
+        result = game["result"]
+
+        return (
+            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
+            f"{result}"
+        )
+
+    if game["turn_symbol"] == "X":
+        return (
+            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
+            "Сейчас ходит ❌"
+        )
+
+    return (
         "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
-        "Нажмите на любую клетку, чтобы присоединиться к игре.\n\n"
-        "❌ — первый игрок\n"
-        "⭕ — второй игрок"
+        "Сейчас ходит ⭕"
     )
 
-    message = await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=board_keyboard(game_id),
-        business_connection_id=business_connection_id,
-    )
 
-    games[game_id]["message_id"] = message.message_id
-
-
-async def start_xox_from_message(
+async def handle_business_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    message = update.effective_message
+    message = update.business_message
 
     if message is None:
         return
 
-    text = message.text or ""
-
-    if text.strip().lower() != "/xox":
+    if not message.text:
         return
 
-    business_connection_id = None
+    text = message.text.strip().lower()
 
-    if update.business_message:
-        business_connection_id = update.business_message.business_connection_id
-
-    await send_xox_game(
-        bot=context.bot,
-        chat_id=message.chat_id,
-        business_connection_id=business_connection_id,
+    logging.info(
+        "Получено Business-сообщение: %r | chat_id=%s | business_id=%s",
+        message.text,
+        message.chat_id,
+        message.business_connection_id,
     )
 
+    if text != "/xox":
+        return
 
-async def xox_button(
+    game_id = uuid.uuid4().hex[:12]
+
+    games[game_id] = {
+        "board": create_board(),
+        "players": {},
+        "turn": None,
+        "turn_symbol": "X",
+        "finished": False,
+        "result": "",
+        "chat_id": message.chat_id,
+        "message_id": message.message_id,
+        "business_connection_id": message.business_connection_id,
+    }
+
+    game = games[game_id]
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=game["chat_id"],
+            message_id=game["message_id"],
+            business_connection_id=game["business_connection_id"],
+            text=game_text(game),
+            reply_markup=make_keyboard(game_id),
+        )
+
+        logging.info(
+            "Команда /xox успешно заменена на игру: %s",
+            game_id
+        )
+
+    except Exception:
+        logging.exception(
+            "Ошибка при редактировании сообщения /xox"
+        )
+
+
+async def handle_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -171,21 +204,30 @@ async def xox_button(
     if query is None:
         return
 
-    await query.answer()
+    data = query.data or ""
 
-    data = query.data
+    if data.startswith("newxox:"):
+        await new_game(query, context)
+        return
 
     if not data.startswith("xox:"):
         return
 
-    _, game_id, position_text = data.split(":")
-    position = int(position_text)
+    await query.answer()
+
+    parts = data.split(":")
+
+    if len(parts) != 3:
+        return
+
+    game_id = parts[1]
+    position = int(parts[2])
 
     game = games.get(game_id)
 
     if game is None:
         await query.answer(
-            "Эта игра уже закончилась.",
+            "Игра уже не существует.",
             show_alert=True
         )
         return
@@ -197,39 +239,37 @@ async def xox_button(
         )
         return
 
-    user = query.from_user
-    user_id = user.id
+    user_id = query.from_user.id
 
     if user_id not in game["players"]:
+
         if len(game["players"]) >= 2:
             await query.answer(
-                "В игре уже участвуют два игрока.",
+                "В игре уже два игрока.",
                 show_alert=True
             )
             return
 
         if len(game["players"]) == 0:
-            game["players"][user_id] = "X"
+            symbol = "X"
             game["turn"] = user_id
-
-            await query.answer(
-                "Ты играешь ❌"
-            )
-
         else:
-            game["players"][user_id] = "O"
+            symbol = "O"
 
-            await query.answer(
-                "Ты играешь ⭕"
-            )
+        game["players"][user_id] = symbol
 
     symbol = game["players"][user_id]
 
     if len(game["players"]) < 2:
-        await query.answer(
-            "Ждём второго игрока.",
-            show_alert=True
+        await update_game_message(
+            game_id,
+            context
         )
+
+        await query.answer(
+            f"Ты играешь {'❌' if symbol == 'X' else '⭕'}"
+        )
+
         return
 
     if game["turn"] != user_id:
@@ -252,119 +292,99 @@ async def xox_button(
 
     if winner == "X":
         game["finished"] = True
-        result_text = (
-            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
-            f"🏆 Победил ❌ — {player_name(user)}!"
-        )
+        game["result"] = "🏆 Победили ❌!"
 
     elif winner == "O":
         game["finished"] = True
-        result_text = (
-            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
-            f"🏆 Победил ⭕ — {player_name(user)}!"
-        )
+        game["result"] = "🏆 Победили ⭕!"
 
     elif winner == "draw":
         game["finished"] = True
-        result_text = (
-            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
-            "🤝 Ничья!"
-        )
+        game["result"] = "🤝 Ничья!"
 
     else:
         if symbol == "X":
-            next_symbol = "⭕"
+            next_symbol = "O"
         else:
-            next_symbol = "❌"
+            next_symbol = "X"
 
-        next_player = None
+        game["turn_symbol"] = next_symbol
 
         for player_id, player_symbol in game["players"].items():
             if player_symbol == next_symbol:
-                next_player = player_id
+                game["turn"] = player_id
                 break
 
-        game["turn"] = next_player
+    await update_game_message(
+        game_id,
+        context
+    )
 
-        result_text = (
-            "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
-            f"Сейчас ход: {next_symbol}"
-        )
+
+async def update_game_message(
+    game_id,
+    context,
+):
+    game = games.get(game_id)
+
+    if game is None:
+        return
 
     try:
         await context.bot.edit_message_text(
             chat_id=game["chat_id"],
             message_id=game["message_id"],
-            text=result_text,
-            reply_markup=board_keyboard(game_id),
             business_connection_id=game["business_connection_id"],
+            text=game_text(game),
+            reply_markup=make_keyboard(game_id),
         )
+
     except Exception:
         logging.exception(
-            "Не удалось обновить поле игры."
+            "Ошибка обновления игрового поля"
         )
 
 
-async def new_xox_game(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+async def new_game(
+    query,
+    context,
 ):
-    query = update.callback_query
-
-    if query is None:
-        return
-
-    await query.answer()
-
-    data = query.data
-
-    if not data.startswith("xoxnew:"):
-        return
-
-    _, old_game_id = data.split(":", 1)
+    old_game_id = query.data.split(":", 1)[1]
 
     old_game = games.get(old_game_id)
 
     if old_game is None:
+        await query.answer(
+            "Игра уже удалена.",
+            show_alert=True
+        )
         return
 
-    chat_id = old_game["chat_id"]
-    business_connection_id = old_game["business_connection_id"]
+    await query.answer()
 
-    game_id = uuid.uuid4().hex[:12]
+    new_id = uuid.uuid4().hex[:12]
 
-    games[game_id] = {
-        "board": empty_board(),
+    games[new_id] = {
+        "board": create_board(),
         "players": {},
         "turn": None,
+        "turn_symbol": "X",
         "finished": False,
-        "chat_id": chat_id,
-        "business_connection_id": business_connection_id,
-        "message_id": query.message.message_id,
+        "result": "",
+        "chat_id": old_game["chat_id"],
+        "message_id": old_game["message_id"],
+        "business_connection_id": old_game["business_connection_id"],
     }
 
-    games.pop(old_game_id, None)
+    del games[old_game_id]
 
-    try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=query.message.message_id,
-            text=(
-                "❌⭕ КРЕСТИКИ-НОЛИКИ\n\n"
-                "Нажмите на любую клетку, чтобы присоединиться к игре.\n\n"
-                "❌ — первый игрок\n"
-                "⭕ — второй игрок"
-            ),
-            reply_markup=board_keyboard(game_id),
-            business_connection_id=business_connection_id,
-        )
-    except Exception:
-        logging.exception(
-            "Не удалось начать новую игру."
-        )
+    await update_game_message(
+        new_id,
+        context
+    )
 
 
-async def business_connection(
+async def handle_business_connection(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -373,69 +393,58 @@ async def business_connection(
     if connection is None:
         return
 
+    logging.info(
+        "Business connection: id=%s enabled=%s",
+        connection.id,
+        connection.is_enabled
+    )
+
     if connection.is_enabled:
         try:
             await context.bot.send_message(
                 chat_id=connection.user_chat_id,
                 text="бот успешно подключен"
             )
-
-            logging.info(
-                "Telegram Business подключен: %s",
-                connection.id
-            )
-
         except Exception:
             logging.exception(
-                "Не удалось отправить уведомление владельцу."
+                "Не удалось отправить сообщение о подключении."
             )
-
-    else:
-        logging.info(
-            "Telegram Business отключен: %s",
-            connection.id
-        )
-
-
-async def all_updates(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    await start_xox_from_message(update, context)
 
 
 def main():
-    if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_НОВЫЙ_ТОКЕН_БОТА":
+    if (
+        not BOT_TOKEN
+        or BOT_TOKEN == "ВСТАВЬ_НОВЫЙ_ТОКЕН_БОТА"
+    ):
         raise RuntimeError(
-            "Вставь токен бота в переменную BOT_TOKEN"
+            "Вставь новый токен бота в BOT_TOKEN"
         )
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(
-        TypeHandler(Update, business_connection)
+        TypeHandler(
+            Update,
+            handle_business_connection
+        )
     )
 
     app.add_handler(
-        TypeHandler(Update, all_updates)
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            xox_button,
-            pattern=r"^xox:"
+        TypeHandler(
+            Update,
+            handle_business_message
         )
     )
 
     app.add_handler(
         CallbackQueryHandler(
-            new_xox_game,
-            pattern=r"^xoxnew:"
+            handle_callback,
+            pattern=r"^(xox|newxox):"
         )
     )
 
     logging.info(
-        "Бот запущен. Ожидание Telegram Business..."
+        "Бот запущен."
     )
 
     app.run_polling(

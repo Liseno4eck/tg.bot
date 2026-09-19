@@ -569,6 +569,9 @@ async def main():
     tasks = [asyncio.create_task(worker()), asyncio.create_task(clock_loop())]
     log.info("бот запущен")
     try:
+        # если у бота включён вебхук, polling не работает: удаляем его
+        # (старые необработанные сообщения отбрасываем, чтобы не выполнить их задним числом)
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         for t in tasks:

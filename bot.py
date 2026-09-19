@@ -167,14 +167,10 @@ async def handle_business_message(
                 text="помощи покачто нету",
             )
 
-            logging.info(
-                "Команда /help успешно обработана."
-            )
+            logging.info("Команда /help успешно обработана.")
 
         except Exception:
-            logging.exception(
-                "Ошибка при обработке команды /help"
-            )
+            logging.exception("Ошибка при обработке команды /help")
 
         return
 
@@ -182,7 +178,6 @@ async def handle_business_message(
         return
 
     game_id = uuid.uuid4().hex[:12]
-
     games[game_id] = {
         "board": create_board(),
         "players": {},
@@ -213,19 +208,12 @@ async def handle_business_message(
                 message_ids=[message.message_id],
             )
         except Exception:
-            logging.exception(
-                "Не удалось удалить сообщение /xox"
-            )
+            logging.exception("Не удалось удалить сообщение /xox")
 
-        logging.info(
-            "Команда /xox успешно обработана: %s",
-            game_id
-        )
+        logging.info("Команда /xox успешно обработана: %s", game_id)
 
     except Exception:
-        logging.exception(
-            "Ошибка при отправке игрового сообщения /xox"
-        )
+        logging.exception("Ошибка при отправке игрового сообщения /xox")
 
 
 async def handle_callback(
@@ -303,15 +291,10 @@ async def handle_callback(
     symbol = game["players"][user_id]
 
     if len(game["players"]) < 2:
-        await update_game_message(
-            game_id,
-            context
-        )
-
+        await update_game_message(game_id, context)
         await query.answer(
             f"Ты играешь {'❌' if symbol == 'X' else '⭕️'}"
         )
-
         return
 
     if game["turn"] != user_id:
@@ -346,7 +329,6 @@ async def handle_callback(
 
     else:
         next_symbol = "O" if symbol == "X" else "X"
-
         game["turn_symbol"] = next_symbol
 
         for player_id, player_symbol in game["players"].items():
@@ -355,11 +337,7 @@ async def handle_callback(
                 break
 
     await query.answer()
-
-    await update_game_message(
-        game_id,
-        context
-    )
+    await update_game_message(game_id, context)
 
 
 async def update_game_message(
@@ -370,7 +348,6 @@ async def update_game_message(
 
     if game is None:
         return
-
     if game["message_id"] is None:
         return
 
@@ -384,9 +361,7 @@ async def update_game_message(
         )
 
     except Exception:
-        logging.exception(
-            "Ошибка обновления игрового поля"
-        )
+        logging.exception("Ошибка обновления игрового поля")
 
 
 async def new_game(
@@ -422,10 +397,7 @@ async def new_game(
 
     del games[old_game_id]
 
-    await update_game_message(
-        new_id,
-        context
-    )
+    await update_game_message(new_id, context)
 
 
 async def handle_business_connection(
@@ -457,10 +429,7 @@ async def handle_business_connection(
 
 
 def main():
-    if (
-        not BOT_TOKEN
-        or BOT_TOKEN == "ВСТАВЬ_НОВЫЙ_ТОКЕН_БОТА"
-    ):
+    if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_НОВЫЙ_ТОКЕН_БОТА":
         raise RuntimeError(
             "Вставь новый токен бота в BOT_TOKEN"
         )
@@ -468,17 +437,11 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(
-        TypeHandler(
-            Update,
-            handle_business_connection
-        )
+        TypeHandler(Update, handle_business_connection)
     )
 
     app.add_handler(
-        TypeHandler(
-            Update,
-            handle_business_message
-        )
+        TypeHandler(Update, handle_business_message)
     )
 
     app.add_handler(
@@ -488,9 +451,7 @@ def main():
         )
     )
 
-    logging.info(
-        "Бот запущен."
-    )
+    logging.info("Бот запущен.")
 
     app.run_polling(
         allowed_updates=[

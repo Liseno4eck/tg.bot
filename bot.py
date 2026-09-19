@@ -156,6 +156,40 @@ async def handle_business_message(
         message.business_connection_id,
     )
 
+    # =========================
+    # КОМАНДА /help
+    # =========================
+
+    if text == "/help":
+        try:
+            # Удаляем сообщение пользователя
+            await context.bot.delete_business_messages(
+                business_connection_id=message.business_connection_id,
+                message_ids=[message.message_id],
+            )
+
+            # Отправляем ответ
+            await context.bot.send_message(
+                chat_id=message.chat_id,
+                business_connection_id=message.business_connection_id,
+                text="помощи покачто нету",
+            )
+
+            logging.info(
+                "Команда /help успешно обработана."
+            )
+
+        except Exception:
+            logging.exception(
+                "Ошибка при обработке команды /help"
+            )
+
+        return
+
+    # =========================
+    # КОМАНДА /xox
+    # =========================
+
     if text != "/xox":
         return
 
@@ -405,6 +439,7 @@ async def handle_business_connection(
                 chat_id=connection.user_chat_id,
                 text="бот успешно подключен"
             )
+
         except Exception:
             logging.exception(
                 "Не удалось отправить сообщение о подключении."

@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 
 
-BOT_TOKEN = "8280076573:AAFknR_2qMrJb89lYr0vMbLi48aruYWNx3Q"
+BOT_TOKEN = "8280076573:AAHiJHpTiFKMT3hBXKs9YBv4jJUWTcxw7V4"
 
 
 logging.basicConfig(
@@ -116,11 +116,9 @@ def game_text(game):
         )
 
     if game["finished"]:
-        result = game["result"]
-
         return (
             "❌⭕️ КРЕСТИКИ-НОЛИКИ\n\n"
-            f"{result}"
+            f"{game['result']}"
         )
 
     if game["turn_symbol"] == "X":
@@ -156,9 +154,6 @@ async def handle_business_message(
         message.business_connection_id,
     )
 
-    # =========================
-    # КОМАНДА /help
-    # =========================
     if text == "/help":
         try:
             await context.bot.delete_business_messages(
@@ -172,15 +167,17 @@ async def handle_business_message(
                 text="помощи покачто нету",
             )
 
-            logging.info("Команда /help успешно обработана.")
+            logging.info(
+                "Команда /help успешно обработана."
+            )
 
         except Exception:
-            logging.exception("Ошибка при обработке команды /help")
+            logging.exception(
+                "Ошибка при обработке команды /help"
+            )
 
         return
-    # =========================
-    # КОМАНДА /xox
-    # =========================
+
     if text != "/xox":
         return
 
@@ -194,15 +191,13 @@ async def handle_business_message(
         "finished": False,
         "result": "",
         "chat_id": message.chat_id,
-        "message_id": None,  # заполним после отправки
+        "message_id": None,
         "business_connection_id": message.business_connection_id,
     }
 
     game = games[game_id]
 
     try:
-        # ИСПРАВЛЕНО: отправляем новое сообщение, а не редактируем
-        # входящее от пользователя (его редактировать нельзя)
         sent = await context.bot.send_message(
             chat_id=game["chat_id"],
             business_connection_id=game["business_connection_id"],
@@ -212,19 +207,25 @@ async def handle_business_message(
 
         game["message_id"] = sent.message_id
 
-        # Удаляем сообщение пользователя с /xox
         try:
             await context.bot.delete_business_messages(
                 business_connection_id=message.business_connection_id,
                 message_ids=[message.message_id],
             )
         except Exception:
-            logging.exception("Не удалось удалить сообщение /xox")
+            logging.exception(
+                "Не удалось удалить сообщение /xox"
+            )
 
-        logging.info("Команда /xox успешно обработана: %s", game_id)
+        logging.info(
+            "Команда /xox успешно обработана: %s",
+            game_id
+        )
 
     except Exception:
-        logging.exception("Ошибка при отправке игрового сообщения /xox")
+        logging.exception(
+            "Ошибка при отправке игрового сообщения /xox"
+        )
 
 
 async def handle_callback(
@@ -248,10 +249,15 @@ async def handle_callback(
     parts = data.split(":")
 
     if len(parts) != 3:
+        await query.answer()
         return
 
-    game_id = parts[1]
-    position = int(parts[2])
+    try:
+        game_id = parts[1]
+        position = int(parts[2])
+    except (ValueError, IndexError):
+        await query.answer()
+        return
 
     game = games.get(game_id)
 
@@ -269,10 +275,16 @@ async def handle_callback(
         )
         return
 
+    if position < 0 or position > 8:
+        await query.answer(
+            "Некорректная клетка.",
+            show_alert=True
+        )
+        return
+
     user_id = query.from_user.id
 
     if user_id not in game["players"]:
-
         if len(game["players"]) >= 2:
             await query.answer(
                 "В игре уже два игрока.",
@@ -291,10 +303,15 @@ async def handle_callback(
     symbol = game["players"][user_id]
 
     if len(game["players"]) < 2:
-        await update_game_message(game_id, context)
+        await update_game_message(
+            game_id,
+            context
+        )
+
         await query.answer(
             f"Ты играешь {'❌' if symbol == 'X' else '⭕️'}"
         )
+
         return
 
     if game["turn"] != user_id:
@@ -318,14 +335,18 @@ async def handle_callback(
     if winner == "X":
         game["finished"] = True
         game["result"] = "🏆 Победили ❌!"
+
     elif winner == "O":
         game["finished"] = True
         game["result"] = "🏆 Победили ⭕️!"
+
     elif winner == "draw":
         game["finished"] = True
         game["result"] = "🤝 Ничья!"
+
     else:
         next_symbol = "O" if symbol == "X" else "X"
+
         game["turn_symbol"] = next_symbol
 
         for player_id, player_symbol in game["players"].items():
@@ -334,8 +355,17 @@ async def handle_callback(
                 break
 
     await query.answer()
-    await update_game_message(game_id, context)
-[19.09.2026 10:25] TG Ai Chat: async def update_game_message(game_id, context):
+
+    await update_game_message(
+        game_id,
+        context
+    )
+
+
+async def update_game_message(
+    game_id,
+    context,
+):
     game = games.get(game_id)
 
     if game is None:
@@ -352,11 +382,17 @@ async def handle_callback(
             text=game_text(game),
             reply_markup=make_keyboard(game_id),
         )
+
     except Exception:
-        logging.exception("Ошибка обновления игрового поля")
+        logging.exception(
+            "Ошибка обновления игрового поля"
+        )
 
 
-async def new_game(query, context):
+async def new_game(
+    query,
+    context,
+):
     old_game_id = query.data.split(":", 1)[1]
 
     old_game = games.get(old_game_id)
@@ -386,7 +422,10 @@ async def new_game(query, context):
 
     del games[old_game_id]
 
-    await update_game_message(new_id, context)
+    await update_game_message(
+        new_id,
+        context
+    )
 
 
 async def handle_business_connection(
@@ -410,6 +449,7 @@ async def handle_business_connection(
                 chat_id=connection.user_chat_id,
                 text="бот успешно подключен"
             )
+
         except Exception:
             logging.exception(
                 "Не удалось отправить сообщение о подключении."
@@ -417,17 +457,30 @@ async def handle_business_connection(
 
 
 def main():
-    if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_НОВЫЙ_ТОКЕН_БОТА":
-        raise RuntimeError("Вставь новый токен бота в BOT_TOKEN")
+    if (
+        not BOT_TOKEN
+        or BOT_TOKEN == "ВСТАВЬ_НОВЫЙ_ТОКЕН_БОТА"
+    ):
+        raise RuntimeError(
+            "Вставь новый токен бота в BOT_TOKEN"
+        )
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(
-        TypeHandler(Update, handle_business_connection)
+        TypeHandler(
+            Update,
+            handle_business_connection
+        )
     )
+
     app.add_handler(
-        TypeHandler(Update, handle_business_message)
+        TypeHandler(
+            Update,
+            handle_business_message
+        )
     )
+
     app.add_handler(
         CallbackQueryHandler(
             handle_callback,
@@ -435,7 +488,9 @@ def main():
         )
     )
 
-    logging.info("Бот запущен.")
+    logging.info(
+        "Бот запущен."
+    )
 
     app.run_polling(
         allowed_updates=[
@@ -444,3 +499,7 @@ def main():
             "callback_query",
         ]
     )
+
+
+if __name__ == "__main__":
+    main()

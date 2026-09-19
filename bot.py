@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import html
 import io
 import json
 import logging
@@ -11,7 +12,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import BusinessConnection, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import (
+    BusinessConnection, CallbackQuery, InlineKeyboardButton,
+    InlineKeyboardMarkup, Message,
+)
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
@@ -56,7 +61,7 @@ HELP = """🤖 Команды (работают только от твоего �
 
 .spam [кол-во] [текст] — повторить сообщение (максимум 10)
 .haha [кол-во] — случайный смех (максимум 10)
-.mute [30s|5m|2h] / .unmute — удалять сообщения собеседника
+.mute [30s|5m|2h] / .unmute — удалять сообщения собеседника (в чате статус с кнопкой «Снять мут»)
 .warn [число] / .unwarn — лимит сообщений, потом мут навсегда
 .clone / .unclone — отправлять собеседнику его же текст обратно
 .wsag / .unwsag — удалять стикеры и гифки собеседника
@@ -70,7 +75,7 @@ HELP = """🤖 Команды (работают только от твоего �
 .pinf — метаданные фото (ответом на фото-файл), результат виден в чате
 .spinf — то же, но результат приходит только тебе сюда
 .type текст — отправить текст по словам
-.help — этот список
+.help — меню команд с кнопками
 
 Время: число + s/m/h (максимум 24 часа)."""
 
@@ -149,13 +154,15 @@ def schedule_delete(conn_id: str, msg_id: int, seconds: int):
     touch()
 
 
-async def send(conn_id: str, chat_id: int, text: str) -> Message:
-    m = await bot.send_message(chat_id=chat_id, text=text, business_connection_id=conn_id)
+async def send(conn_id: str, chat_id: int, text: str, reply_markup=None, keep: bool = False) -> Message:
+    m = await bot.send_message(
+        chat_id=chat_id, text=text, business_connection_id=conn_id, reply_markup=reply_markup
+    )
     if len(sent_ids) > 5000:
         sent_ids.clear()
     sent_ids.add(m.message_id)
     ttl = chat_state(conn_id, chat_id).get("bchat")
-    if ttl:
+    if ttl and not keep:
         schedule_delete(conn_id, m.message_id, ttl)
     return m
 
@@ -178,6 +185,89 @@ async def done(message: Message, owner_id: int, note: str):
     """Убрать команду из чата и тихо сообщить владельцу результат."""
     await delete_msgs(message.business_connection_id, [message.message_id])
     await notify(owner_id, f"{note}\nЧат: {message.chat.full_name or message.chat.id}")
+
+
+# ---------------------------------------------------------------- статусы с кнопками
+# режимы, о которых пишем прямо в чат с собеседником; остальные (розыгрыши) — только тебе в чат с ботом
+PUBLIC = {"mute", "warn", "wsag", "wbl", "bw", "bchat"}
+BUTTONS = {
+    "mute": "🔊 Снять мут", "warn": "✅ Снять warn", "wsag": "❌ Выключить", "wbl": "❌ Выключить",
+    "bw": "❌ Выключить", "bchat": "❌ Выключить", "clone": "❌ Выключить",
+    "imit": "⏹ Остановить", "time": "❌ Выключить",
+}
+
+
+def who_of(chat) -> str:
+    username = getattr(chat, "username", None)
+    return f"@{username}" if username else (chat.full_name or str(chat.id))
+
+
+async def announce(message: Message, owner_id: int, key: str, text: str):
+    """Убрать команду и показать статус режима с кнопкой отмены."""
+    conn_id = message.business_connection_id
+    chat_id = message.chat.id
+    st = chat_state(conn_id, chat_id)
+    st["who"] = who_of(message.chat)
+    touch()
+    await delete_msgs(conn_id, [message.message_id])
+    kb = markup([[(BUTTONS[key], f"u:{key}:{chat_id}")]])
+    if key in PUBLIC:
+        try:
+            m = await send(conn_id, chat_id, text, reply_markup=kb, keep=True)
+            st.setdefault("status", {})[key] = m.message_id
+            return
+        except Exception as e:
+            # Telegram не принял кнопку в бизнес-чате: пишем в чат текст, а кнопку даём в чате с ботом
+            log.warning("кнопку в чат отправить не удалось (%s)", e)
+            await send(conn_id, chat_id, text, keep=True)
+    await bot.send_message(owner_id, f"{text}\nЧат: {st['who']}", reply_markup=kb)
+
+
+async def apply_undo(conn_id: str, chat_id: int, key: str) -> str:
+    """Выключить режим и, если в чате висит его статус, заменить статус на итоговый текст."""
+    st = chat_state(conn_id, chat_id)
+    who = st.get("who", "собеседник")
+    if key == "mute":
+        st.pop("mute_until", None)
+        st["warn_count"] = 0
+        text = f"🔊 {who} снят с мута"
+    elif key == "warn":
+        st.pop("warn_limit", None)
+        st.pop("warn_count", None)
+        text = f"✅ Warn снят с {who}"
+    elif key in TOGGLES:
+        st.pop(key, None)
+        text = f"{TOGGLES[key]}: выключено"
+    elif key == "bchat":
+        st.pop("bchat", None)
+        text = "⏳ Автоудаление выключено"
+    elif key == "imit":
+        task = imit_tasks.pop(f"{conn_id}:{chat_id}", None)
+        if task:
+            task.cancel()
+        text = "🎭 Имитация выключена"
+    elif key == "time":
+        cfg = state["time"].pop(conn_id, None)
+        if cfg:
+            try:
+                await bot.set_business_account_name(
+                    conn_id, first_name=cfg["first"], last_name=cfg["last"] or None
+                )
+            except Exception as e:
+                log.warning("не удалось вернуть фамилию: %s", e)
+        text = "🕒 Время в профиле выключено"
+    else:
+        return ""
+    touch()
+    mid = st.get("status", {}).pop(key, None)
+    if mid:
+        try:
+            await bot.edit_message_text(
+                text, business_connection_id=conn_id, chat_id=chat_id, message_id=mid
+            )
+        except Exception as e:
+            log.warning("не удалось обновить статус в чате: %s", e)
+    return text
 
 
 # ---------------------------------------------------------------- фоновые задачи
@@ -320,7 +410,7 @@ async def handle_command(message: Message, owner_id: int):
 
     if cmd == "help":
         await delete_msgs(conn_id, [message.message_id])
-        await notify(owner_id, HELP)
+        await send_menu(owner_id)
         return
 
     # --- удаление сообщений собеседника
@@ -330,31 +420,29 @@ async def handle_command(message: Message, owner_id: int):
             return await bad_usage(message, owner_id, ".mute [30s|5m|2h]")
         st["mute_until"] = time.time() + dur if dur else 0
         touch()
-        return await done(message, owner_id, f"🔇 Мут собеседника: {arg if dur else 'навсегда'}")
+        return await announce(
+            message, owner_id, "mute",
+            f"🔇 {who_of(message.chat)} в муте " + (f"на {arg}" if dur else "навсегда"),
+        )
     if cmd == "unmute":
-        st.pop("mute_until", None)
-        st["warn_count"] = 0
-        touch()
-        return await done(message, owner_id, "🔊 Мут снят")
+        return await done(message, owner_id, await apply_undo(conn_id, chat_id, "mute"))
     if cmd == "warn":
         if not arg.isdigit() or int(arg) < 1:
             return await bad_usage(message, owner_id, ".warn [число]")
         st["warn_limit"], st["warn_count"] = int(arg), 0
         touch()
-        return await done(message, owner_id, f"⚠️ Warn: собеседник может написать {arg} сообщений")
+        return await announce(
+            message, owner_id, "warn",
+            f"⚠️ {who_of(message.chat)}: warn, можно написать {arg} сообщений",
+        )
     if cmd == "unwarn":
-        st.pop("warn_limit", None)
-        st.pop("warn_count", None)
-        touch()
-        return await done(message, owner_id, "✅ Warn снят")
+        return await done(message, owner_id, await apply_undo(conn_id, chat_id, "warn"))
     if cmd in TOGGLES:
         st[cmd] = True
         touch()
-        return await done(message, owner_id, f"{TOGGLES[cmd]}: включено")
+        return await announce(message, owner_id, cmd, f"{TOGGLES[cmd]}: включено")
     if cmd.startswith("un") and cmd[2:] in TOGGLES:
-        st.pop(cmd[2:], None)
-        touch()
-        return await done(message, owner_id, f"{TOGGLES[cmd[2:]]}: выключено")
+        return await done(message, owner_id, await apply_undo(conn_id, chat_id, cmd[2:]))
     if cmd == "bwadd" and arg:
         word = arg.lower()
         if word not in state["bad_words"]:
@@ -377,11 +465,9 @@ async def handle_command(message: Message, owner_id: int):
             return await bad_usage(message, owner_id, ".bchat 30s | 5m | 2h")
         st["bchat"] = dur
         touch()
-        return await done(message, owner_id, f"⏳ Автоудаление всех новых сообщений через {arg}")
+        return await announce(message, owner_id, "bchat", f"⏳ Автоудаление сообщений через {arg}")
     if cmd == "unbchat":
-        st.pop("bchat", None)
-        touch()
-        return await done(message, owner_id, "⏳ Автоудаление выключено")
+        return await done(message, owner_id, await apply_undo(conn_id, chat_id, "bchat"))
     if cmd == "burn":
         first, _, body = arg.partition(" ")
         dur = parse_dur(first)
@@ -427,23 +513,14 @@ async def handle_command(message: Message, owner_id: int):
         if key in imit_tasks:
             imit_tasks[key].cancel()
         imit_tasks[key] = asyncio.create_task(imit_loop(conn_id, chat_id, action))
-        return await done(message, owner_id, f"🎭 Имитация включена: {arg.lower()}")
+        return await announce(message, owner_id, "imit", f"🎭 Имитация включена: {arg.lower()}")
     if cmd == "unimit":
-        task = imit_tasks.pop(key, None)
-        if task:
-            task.cancel()
-        return await done(message, owner_id, "🎭 Имитация выключена")
+        return await done(message, owner_id, await apply_undo(conn_id, chat_id, "imit"))
 
     # --- время в фамилии профиля
     if cmd == "time":
         if arg.lower() in ("off", "выкл"):
-            cfg = state["time"].pop(conn_id, None)
-            touch()
-            if cfg:
-                await bot.set_business_account_name(
-                    conn_id, first_name=cfg["first"], last_name=cfg["last"] or None
-                )
-            return await done(message, owner_id, "🕒 Время в профиле выключено")
+            return await done(message, owner_id, await apply_undo(conn_id, chat_id, "time"))
         tz = arg or "UTC"
         try:
             ZoneInfo(tz)
@@ -462,7 +539,7 @@ async def handle_command(message: Message, owner_id: int):
         except Exception as e:
             state["time"].pop(conn_id, None)
             return await done(message, owner_id, f"⚠️ Не удалось изменить имя ({e}). Проверь, что у бота есть право на изменение имени.")
-        return await done(message, owner_id, f"🕒 Время в профиле включено ({tz})")
+        return await announce(message, owner_id, "time", f"🕒 Время в профиле включено ({tz})")
 
     # --- метаданные фото
     if cmd in ("pinf", "spinf"):
@@ -553,15 +630,259 @@ async def on_business_message(message: Message):
         await notify(owner_id, f"⚠️ Ошибка команды: {e}")
 
 
-# /help и /start прямо в чате с самим ботом
-@dp.message(F.text.in_({"/help", "/start"}))
-async def on_direct(message: Message):
+# ---------------------------------------------------------------- меню с кнопками
+def _card(cmd: str, body: str) -> str:
+    return f"<b>Команда:</b> <code>.{cmd}</code>\n\n<blockquote>{body}</blockquote>"
+
+
+DESC = {
+    "spam": (
+        "Спам в чате с собеседником (максимум 10 сообщений)\n\n"
+        "<b>Использование:</b>\n<code>.spam [кол-во] [текст]</code>\n\n"
+        "<b>Пример:</b>\n<code>.spam 5 Привет</code>"
+    ),
+    "haha": (
+        "Отправляет в чат случайный смех отдельными сообщениями (максимум 10)\n\n"
+        "<b>Использование:</b>\n<code>.haha [кол-во]</code>\n\n"
+        "<b>Пример:</b>\n<code>.haha 5</code>"
+    ),
+    "mute": (
+        "После команды <code>.mute</code> все сообщения собеседника автоматически удаляются. "
+        "После <code>.unmute</code> сообщения перестают удаляться.\n\n"
+        "1. <code>.mute 30s</code> — мутит на 30 секунд\n"
+        "2. <code>.mute 5m</code> — мутит на 5 минут\n"
+        "3. <code>.mute 2h</code> — мутит на 2 часа\n"
+        "4. <code>.mute</code> — мутит навсегда\n"
+        "5. <code>.unmute</code> — снимает мут досрочно\n\n"
+        "<b>Использование:</b>\n<code>.mute [число][s/m/h]</code> — на время\n"
+        "<code>.mute</code> — навсегда\n\nМаксимум для времени — 24 часа."
+    ),
+    "warn": (
+        "Warn режим — собеседник может написать указанное количество сообщений, "
+        "после чего он замутится навсегда\n\n"
+        "<b>Использование:</b>\n<code>.warn [число]</code> — включить с лимитом\n"
+        "<code>.unwarn</code> — снять warn\n<code>.unmute</code> — снять мут, выданный после warn\n\n"
+        "<b>Пример:</b>\n<code>.warn 5</code> — собеседник может написать 5 сообщений"
+    ),
+    "clone": (
+        "Режим клонирования — все текстовые сообщения собеседника автоматически "
+        "отправляются ему обратно\n\n"
+        "<b>Использование:</b>\n<code>.clone</code> — включить режим\n"
+        "<code>.unclone</code> — выключить режим\n\n"
+        "<b>Пример:</b>\nСобеседник пишет: <code>кегля</code>\nБот отправляет ему: <code>кегля</code>"
+    ),
+    "wsag": (
+        "Анти стикер/гифка — стикеры и гифки собеседника автоматически удаляются\n\n"
+        "<b>Использование:</b>\n<code>.wsag</code> — включить режим\n"
+        "<code>.unwsag</code> — выключить режим"
+    ),
+    "wbl": (
+        "Фильтр мата — удаляет все сообщения с матом от собеседника в текущем чате\n\n"
+        "<b>Использование:</b>\n<code>.wbl</code> — включить фильтр\n"
+        "<code>.unwbl</code> — выключить фильтр"
+    ),
+    "bw": (
+        "Удаляет сообщения собеседника, в которых есть слова из списка бан-слов\n\n"
+        "<b>Использование:</b>\n<code>.bw</code> — включить режим\n"
+        "<code>.unbw</code> — выключить режим\n\n"
+        "<b>Список слов:</b>\n<code>.bwadd слово</code> — добавить\n"
+        "<code>.bwdel слово</code> — удалить\n<code>.bwlist</code> — показать список\n\n"
+        "<b>Пример:</b>\nДобавляешь слово <code>спам</code> — собеседник пишет «это спам», "
+        "бот удаляет сообщение"
+    ),
+    "imit": (
+        "Имитация действия — бот бесконечно показывает собеседнику, что ты печатаешь, "
+        "записываешь голосовое и т.д.\n\n"
+        "<b>Использование:</b>\n"
+        "<code>.imit typing</code> — печатает\n<code>.imit voice</code> — записывает голосовое\n"
+        "<code>.imit video</code> — записывает видео\n<code>.imit circle</code> — записывает кружок\n"
+        "<code>.imit photo</code> — отправляет фото\n<code>.imit file</code> — отправляет файл\n"
+        "<code>.imit sticker</code> — выбирает стикер\n<code>.unimit</code> — остановить"
+    ),
+    "time": (
+        "Показывает текущее время в фамилии профиля, обновляется каждую минуту.\n\n"
+        "<b>Использование:</b>\n<code>.time Europe/Kyiv</code> — включить (укажи свой часовой пояс)\n"
+        "<code>.time off</code> — выключить и вернуть прежнюю фамилию\n\n"
+        "<b>Информация:</b>\n• Часовой пояс в формате Континент/Город\n"
+        "• Требует разрешение на изменение имени"
+    ),
+    "burn": (
+        "Отправляет сообщение, которое исчезает через заданное время.\n\n"
+        "1. <code>.burn 30s текст</code> — исчезнет через 30 секунд\n"
+        "2. <code>.burn 5m текст</code> — исчезнет через 5 минут\n"
+        "3. <code>.burn 2h текст</code> — исчезнет через 2 часа\n\n"
+        "<b>Использование:</b>\n<code>.burn [число][s/m/h] текст</code>\n\n"
+        "<b>Пример:</b>\n<code>.burn 30s привет</code>\n\nМаксимум — 24 часа."
+    ),
+    "bchat": (
+        "После команды <code>.bchat</code> все новые сообщения в чате (и твои, и собеседника, "
+        "любого типа) автоматически удаляются через заданное время. "
+        "После <code>.unbchat</code> сообщения перестают удаляться.\n\n"
+        "1. <code>.bchat 30s</code> — удаляются через 30 секунд\n"
+        "2. <code>.bchat 5m</code> — удаляются через 5 минут\n"
+        "3. <code>.bchat 2h</code> — удаляются через 2 часа\n"
+        "4. <code>.unbchat</code> — выключает режим досрочно\n\n"
+        "<b>Использование:</b>\n<code>.bchat [число][s/m/h]</code> — включить\n"
+        "<code>.unbchat</code> — выключить\n\nМаксимум — 24 часа."
+    ),
+    "pinf": (
+        "Показывает информацию о фото прямо в чате с собеседником: устройство, дату съёмки, "
+        "геолокацию, размер, хэши и другие метаданные.\n\n"
+        "<b>Примечание:</b>\nЕсли на устройстве при съёмке была отключена геолокация, информация "
+        "о местоположении отображаться не будет. Также бот может получить информацию только "
+        "из фото, отправленного как файл.\n\n"
+        "<b>Использование:</b>\nОтветь на фото (отправленное файлом) и напиши <code>.pinf</code>"
+    ),
+    "spinf": (
+        "Показывает информацию о фото тайно: результат приходит только тебе в чат с ботом, "
+        "собеседник ничего не увидит и не узнает. Бот покажет устройство, дату съёмки, "
+        "геолокацию, размер, хэши и другие метаданные.\n\n"
+        "<b>Примечание:</b>\nЕсли на устройстве при съёмке была отключена геолокация, информация "
+        "о местоположении отображаться не будет. Также бот может получить информацию только "
+        "из фото, отправленного как файл.\n\n"
+        "<b>Использование:</b>\nОтветь на фото (отправленное файлом) и напиши <code>.spinf</code>"
+    ),
+    "type": (
+        "Отправляет текст по словам отдельными сообщениями (максимум 50 слов).\n\n"
+        "<b>Использование:</b>\nНапиши <code>.type [текст]</code>\n\n"
+        "<b>Пример:</b>\n<code>.type всем привет как дела</code>"
+    ),
+}
+
+DESC["mute"] += "\n\nВ чате появится сообщение «@user в муте» с кнопкой «Снять мут»."
+for _k in ("warn", "wsag", "wbl", "bw", "bchat"):
+    DESC[_k] += "\n\nВ чате появится сообщение о включении с кнопкой «Выключить»."
+for _k in ("clone", "imit", "time"):
+    DESC[_k] += "\n\nСообщение с кнопкой «Выключить» придёт тебе в чат с ботом."
+
+CATEGORIES = {
+    "actions": "Действия с собеседником",
+    "games": "Игры",
+    "utils": "Утилиты",
+    "text": "Текст",
+    "media": "Медиа",
+}
+# какие команды лежат в каждой категории (пустые разделы можно наполнить позже)
+CAT_COMMANDS = {
+    "actions": [
+        "spam", "haha", "mute", "warn", "clone", "wsag", "wbl", "bw",
+        "imit", "time", "burn", "bchat", "pinf", "spinf", "type",
+    ],
+}
+
+MAIN_TEXT = (
+    "📖 <b>Описание команд</b>\n\nСписок команд, доступных в чате с собеседником.\n"
+    "<blockquote>Выбери категорию ниже, чтобы посмотреть команды.</blockquote>"
+)
+
+
+def markup(rows) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=d) for t, d in row] for row in rows]
+    )
+
+
+def screen(path: str):
+    """Возвращает (текст, клавиатура) для экрана меню."""
+    kind, _, arg = path.partition(":")
+    if kind == "cat" and arg in CATEGORIES:
+        cmds = CAT_COMMANDS.get(arg, [])
+        rows = [[(f".{c}", f"m:cmd:{c}") for c in cmds[i:i + 3]] for i in range(0, len(cmds), 3)]
+        rows.append([("👈 Назад", "m:main")])
+        hint = ("Выбери команду ниже, чтобы ознакомиться с её функционалом."
+                if cmds else "В этом разделе пока нет команд.")
+        return f"<b>{CATEGORIES[arg]}</b>\n\n<blockquote>{hint}</blockquote>", markup(rows)
+    if kind == "cmd" and arg in DESC:
+        return _card(arg, DESC[arg]), markup([[("👈 Назад", "m:cat:actions")]])
+    if kind == "brief":
+        text = "📋 <b>Краткое описание</b>\n\n<blockquote>" + html.escape(HELP) + "</blockquote>"
+        return text, markup([[("👈 Назад", "m:main")]])
+    rows = [
+        [("Действия с собеседником", "m:cat:actions")],
+        [("Игры", "m:cat:games"), ("Утилиты", "m:cat:utils")],
+        [("Текст", "m:cat:text"), ("Медиа", "m:cat:media")],
+        [("Краткое описание", "m:brief")],
+        [("✖️ Закрыть", "m:close")],
+    ]
+    return MAIN_TEXT, markup(rows)
+
+
+def is_owner(user_id: int) -> bool:
+    owners = set(state["owners"].values())
+    return not owners or user_id in owners
+
+
+async def send_menu(chat_id: int):
+    text, kb = screen("main")
+    await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("m:"))
+async def on_menu(cb: CallbackQuery):
+    if not is_owner(cb.from_user.id):
+        return await cb.answer("Меню доступно только владельцу бота", show_alert=True)
+    if not cb.message:
+        return await cb.answer()
+    path = cb.data[2:]
+    if path == "close":
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
+        return await cb.answer()
+    text, kb = screen(path)
+    try:
+        await cb.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass  # например, "message is not modified"
+    await cb.answer()
+
+
+# кнопки «Снять мут» / «Выключить» под статусами
+@dp.callback_query(F.data.startswith("u:"))
+async def on_undo(cb: CallbackQuery):
+    try:
+        _, key, raw_chat = cb.data.split(":")
+        chat_id = int(raw_chat)
+    except ValueError:
+        return await cb.answer()
+    msg = cb.message
+    conn_id = getattr(msg, "business_connection_id", None) if msg else None
+    if not conn_id:  # кнопка нажата в чате с ботом: ищем подключение по чату
+        conn_id = next(
+            (k.rsplit(":", 1)[0] for k in state["chats"] if k.endswith(f":{chat_id}")), None
+        )
+    if not conn_id:
+        return await cb.answer("Не нашёл этот чат", show_alert=True)
+    if cb.from_user.id != await get_owner(conn_id):
+        return await cb.answer("Это может сделать только владелец", show_alert=True)
+
+    text = await apply_undo(conn_id, chat_id, key)
+    if msg and text:
+        try:
+            if getattr(msg, "business_connection_id", None):
+                await bot.edit_message_text(
+                    text, business_connection_id=conn_id, chat_id=msg.chat.id, message_id=msg.message_id
+                )
+            else:
+                await msg.edit_text(text)
+        except Exception as e:  # например, сообщение уже обновлено
+            log.info("статус не изменён: %s", e)
+    await cb.answer()
+
+
+# /help прямо в чате с самим ботом
+@dp.message(F.text == "/help")
+async def on_direct_help(message: Message):
     await message.answer(TEST_TEXT)
 
 
-@dp.message(F.text == "/commands")
-async def on_commands(message: Message):
-    await message.answer(HELP)
+# меню с кнопками: /start, /menu или /commands в чате с ботом
+@dp.message(F.text.in_({"/start", "/menu", "/commands"}))
+async def on_direct_menu(message: Message):
+    if not is_owner(message.from_user.id):
+        return await message.answer("Это личный бот.")
+    await send_menu(message.chat.id)
 
 
 async def main():

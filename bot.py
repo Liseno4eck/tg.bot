@@ -596,6 +596,7 @@ async def handle_incoming(message: Message):
         schedule_delete(conn_id, message.message_id, st["bchat"])
     if st.get("clone") and message.text:
         await send(conn_id, message.chat.id, message.text)
+    await game_text(message, "p")
     await streak_event(conn_id, message.chat.id, "them")
 
 
@@ -636,6 +637,7 @@ async def on_business_message(message: Message):
             ttl = chat_state(conn_id, message.chat.id).get("bchat")
             if ttl:
                 schedule_delete(conn_id, message.message_id, ttl)
+            await game_text(message, "o")
             await streak_event(conn_id, message.chat.id, "me")
     except Exception as e:
         log.exception("ошибка команды")
@@ -765,7 +767,9 @@ DESC.update({
     "xox": (
         "Запускает игру Крестики-нолики прямо в чате с собеседником.\n\n"
         "<b>Использование:</b>\nНапиши <code>.xox</code> — собеседник нажимает «Принять вызов» "
-        "и игра начинается!"
+        "и игра начинается!\n\nПоле показывается прямо в тексте сообщения, поэтому его видят оба. "
+        "Ходить можно кнопками или сообщением с номером клетки (1–9), "
+        "а принять вызов можно и сообщением «принять»."
     ),
     "flip": (
         "Орёл или Решка — игра с собеседником\n\n"
@@ -842,7 +846,8 @@ def screen(path: str):
                 if cmds else "В этом разделе пока нет команд.")
         return f"<b>{CATEGORIES[arg]}</b>\n\n<blockquote>{hint}</blockquote>", markup(rows)
     if kind == "cmd" and arg in DESC:
-        return _card(arg, DESC[arg]), markup([[("👈 Назад", "m:cat:actions")]])
+        back = next((cat for cat, cmds in CAT_COMMANDS.items() if arg in cmds), None)
+        return _card(arg, DESC[arg]), markup([[("👈 Назад", f"m:cat:{back}" if back else "m:main")]])
     if kind == "brief":
         text = "📋 <b>Краткое описание</b>\n\n<blockquote>" + html.escape(HELP) + "</blockquote>"
         return text, markup([[("👈 Назад", "m:main")]])
@@ -951,6 +956,19 @@ async def owner_name(conn_id: str) -> str:
     return state["names"][conn_id]
 
 
+NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+ACCEPT_WORDS = {"+", "принять", "принимаю", "да", "ок", "ok", "yes", "го", "погнали"}
+
+
+def xox_cells(g: dict) -> list:
+    return [g["board"][i] or NUM[i] for i in range(9)]
+
+
+def xox_board(g: dict) -> str:
+    c = xox_cells(g)
+    return "\n".join("".join(c[r * 3:r * 3 + 3]) for r in range(3))
+
+
 def g_render(g: dict):
     """Текст и кнопки игры в её текущем состоянии."""
     k, c, o, p = g["kind"], g["chat"], g["o"], g["p"]
@@ -965,10 +983,13 @@ def g_render(g: dict):
                 [[(RPS_BTN[x], gb(c, "pick", x)) for x in "rsp"]])
     if k == "xox":
         if g["state"] == "invite":
-            return f"❌⭕ Крестики-нолики\n{o} бросает вызов {p}.\n\n{p}, нажми «Принять вызов»!", invite
-        rows = [[(g["board"][r * 3 + i] or "▫️", gb(c, "cell", str(r * 3 + i))) for i in range(3)]
-                for r in range(3)]
-        return (f"❌⭕ Крестики-нолики\n❌ {o}   ⭕ {p}\n\nХод: {SYM[g['turn']]} {g_name(g, g['turn'])}", rows)
+            return (f"❌⭕ Крестики-нолики\n{o} бросает вызов {p}.\n\n"
+                    f"{p}, нажми «Принять вызов» или напиши в чат «принять».", invite)
+        cells = xox_cells(g)
+        rows = [[(cells[r * 3 + i], gb(c, "cell", str(r * 3 + i))) for i in range(3)] for r in range(3)]
+        return (f"❌⭕ Крестики-нолики\n❌ {o}   ⭕ {p}\n\n{xox_board(g)}\n\n"
+                f"Ход: {SYM[g['turn']]} {g_name(g, g['turn'])}\n"
+                "Ходить можно кнопкой или сообщением с номером клетки (1–9).", rows)
     if k == "revo":
         if g["state"] == "invite":
             return (f"🔫 Русская рулетка\n{o} бросает вызов {p}.\n"
@@ -1101,8 +1122,7 @@ async def g_action(cb: CallbackQuery, g: dict, role: str, action: str, arg: str)
         win = any(b[x] and b[x] == b[y] == b[z] for x, y, z in XOX_LINES)
         if win or all(b):
             head = f"🏆 Победил {SYM[role]} {name}!" if win else "🤝 Ничья!"
-            rows = [[(b[r * 3 + j] or "▫️", "g:0:noop") for j in range(3)] for r in range(3)]
-            await g_finish(g, f"❌⭕ Крестики-нолики\n{head}", rows)
+            await g_finish(g, f"❌⭕ Крестики-нолики\n❌ {g['o']}   ⭕ {g['p']}\n\n{xox_board(g)}\n\n{head}")
         else:
             g["turn"] = other(role)
             text, rows = g_render(g)
@@ -1162,6 +1182,36 @@ async def on_game(cb: CallbackQuery):
         except Exception:
             log.exception("ошибка в игре")
             await cb.answer("Что-то пошло не так")
+
+
+class _TextCb:
+    """Заглушка вместо callback_query: ход сделан сообщением, отвечать некуда."""
+
+    async def answer(self, *args, **kwargs):
+        return None
+
+
+async def game_text(message: Message, role: str) -> bool:
+    """Крестики-нолики сообщениями: «принять» и номер клетки 1–9. True — сообщение учтено игрой."""
+    g = games.get(message.chat.id)
+    if not g or g["over"] or g["kind"] != "xox":
+        return False
+    t = (message.text or "").strip().lower()
+    if g["state"] == "invite" and role == "p" and t in ACCEPT_WORDS:
+        action, arg = "accept", ""
+    elif g["state"] == "play" and len(t) == 1 and t in "123456789":
+        action, arg = "cell", str(int(t) - 1)
+    else:
+        return False
+    async with g["lock"]:
+        if g["over"]:
+            return False
+        try:
+            await g_action(_TextCb(), g, role, action, arg)
+        except Exception:
+            log.exception("ошибка игры (ход сообщением)")
+            return False
+    return True
 
 
 # ---------------------------------------------------------------- серия (streak)

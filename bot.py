@@ -8,7 +8,7 @@ import os
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
@@ -48,6 +48,7 @@ TOGGLES = {
 KNOWN = {
     "help", "spam", "haha", "mute", "unmute", "warn", "unwarn", "bchat", "unbchat",
     "burn", "type", "imit", "unimit", "time", "pinf", "spinf", "bwadd", "bwdel", "bwlist",
+    "flip", "rps", "xox", "revo", "duel", "streak",
 } | set(TOGGLES) | {"un" + k for k in TOGGLES}
 
 PROFANITY = re.compile(
@@ -75,6 +76,8 @@ HELP = """🤖 Команды (работают только от твоего �
 .pinf — метаданные фото (ответом на фото-файл), результат виден в чате
 .spinf — то же, но результат приходит только тебе сюда
 .type текст — отправить текст по словам
+.revo / .rps / .flip / .xox / .duel — игры с собеседником
+.streak — серия с собеседником (как в Snapchat)
 .help — меню команд с кнопками
 
 Время: число + s/m/h (максимум 24 часа)."""
@@ -83,7 +86,7 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # ---------------------------------------------------------------- состояние
-state = {"chats": {}, "queue": [], "bad_words": [], "owners": {}, "time": {}}
+state = {"chats": {}, "queue": [], "bad_words": [], "owners": {}, "time": {}, "names": {}}
 dirty = False
 sent_ids: set[int] = set()  # id сообщений, отправленных самим ботом
 imit_tasks: dict[str, asyncio.Task] = {}
@@ -541,6 +544,12 @@ async def handle_command(message: Message, owner_id: int):
             return await done(message, owner_id, f"⚠️ Не удалось изменить имя ({e}). Проверь, что у бота есть право на изменение имени.")
         return await announce(message, owner_id, "time", f"🕒 Время в профиле включено ({tz})")
 
+    # --- игры
+    if cmd in GAME_CMDS:
+        return await g_start(message, owner_id, cmd)
+    if cmd == "streak":
+        return await streak_menu(message, owner_id)
+
     # --- метаданные фото
     if cmd in ("pinf", "spinf"):
         data, name = await get_replied_image(message)
@@ -587,6 +596,7 @@ async def handle_incoming(message: Message):
         schedule_delete(conn_id, message.message_id, st["bchat"])
     if st.get("clone") and message.text:
         await send(conn_id, message.chat.id, message.text)
+    await streak_event(conn_id, message.chat.id, "them")
 
 
 # ---------------------------------------------------------------- обработчики Telegram
@@ -594,6 +604,7 @@ async def handle_incoming(message: Message):
 async def on_connection(conn: BusinessConnection):
     log.info("business_connection: enabled=%s rights=%s", conn.is_enabled, conn.rights)
     state["owners"][conn.id] = conn.user.id
+    state["names"][conn.id] = conn.user.first_name or "Я"
     touch()
     if conn.is_enabled:
         await bot.send_message(conn.user_chat_id, "бот успешно подключен")
@@ -625,6 +636,7 @@ async def on_business_message(message: Message):
             ttl = chat_state(conn_id, message.chat.id).get("bchat")
             if ttl:
                 schedule_delete(conn_id, message.message_id, ttl)
+            await streak_event(conn_id, message.chat.id, "me")
     except Exception as e:
         log.exception("ошибка команды")
         await notify(owner_id, f"⚠️ Ошибка команды: {e}")
@@ -749,6 +761,42 @@ DESC = {
     ),
 }
 
+DESC.update({
+    "xox": (
+        "Запускает игру Крестики-нолики прямо в чате с собеседником.\n\n"
+        "<b>Использование:</b>\nНапиши <code>.xox</code> — собеседник нажимает «Принять вызов» "
+        "и игра начинается!"
+    ),
+    "flip": (
+        "Орёл или Решка — игра с собеседником\n\n"
+        "<b>Использование:</b>\n<code>.flip</code> — сыграть в монетку"
+    ),
+    "rps": (
+        "Камень, ножницы, бумага — игра с собеседником\n\n"
+        "<b>Использование:</b>\n<code>.rps</code> — начать игру"
+    ),
+    "revo": (
+        "Русская рулетка — игра с собеседником\n\n"
+        "<b>Использование:</b>\n<code>.revo</code> — бросить вызов собеседнику\n\n"
+        "После принятия вызова начинается игра. Игроки стреляют в самих себя по очереди — "
+        "в барабане один заряженный патрон. Кому не повезёт — тот проиграл."
+    ),
+    "duel": (
+        "Дуэль на реакцию с собеседником.\n\n"
+        "<b>Использование:</b>\nНапиши <code>.duel</code> — собеседник принимает вызов. "
+        "Когда кнопка станет зелёной — жми первым.\n\n"
+        "Кто выстрелит раньше времени — рискует застрелиться сам."
+    ),
+    "streak": (
+        "Серия с собеседником — как в Snapchat.\n"
+        "Пишите друг другу каждый день, чтобы серия росла.\n\n"
+        "<b>Использование:</b>\n<code>.streak</code> — открыть меню серии\n\n"
+        "Можно создать глазика — питомца серии.\n"
+        "Если не писать день — серия умирает.\n"
+        "Восстановить можно 5 раз в месяц.\n\n"
+        "День считается по часовому поясу из <code>.time</code> (по умолчанию UTC)."
+    ),
+})
 DESC["mute"] += "\n\nВ чате появится сообщение «@user в муте» с кнопкой «Снять мут»."
 for _k in ("warn", "wsag", "wbl", "bw", "bchat"):
     DESC[_k] += "\n\nВ чате появится сообщение о включении с кнопкой «Выключить»."
@@ -768,6 +816,7 @@ CAT_COMMANDS = {
         "spam", "haha", "mute", "warn", "clone", "wsag", "wbl", "bw",
         "imit", "time", "burn", "bchat", "pinf", "spinf", "type",
     ],
+    "games": ["revo", "rps", "flip", "xox", "duel", "streak"],
 }
 
 MAIN_TEXT = (
@@ -869,6 +918,404 @@ async def on_undo(cb: CallbackQuery):
         except Exception as e:  # например, сообщение уже обновлено
             log.info("статус не изменён: %s", e)
     await cb.answer()
+
+
+# ---------------------------------------------------------------- игры с собеседником
+GAME_CMDS = {"flip", "rps", "xox", "revo", "duel"}
+games: dict[int, dict] = {}  # chat_id -> текущая игра (одна на чат)
+SYM = {"o": "❌", "p": "⭕"}
+XOX_LINES = [(0, 1, 2), (3, 4, 5), (6, 7, 8), (0, 3, 6), (1, 4, 7), (2, 5, 8), (0, 4, 8), (2, 4, 6)]
+RPS_NAMES = {"r": "🪨 камень", "s": "✌️ ножницы", "p": "📄 бумага"}
+RPS_BTN = {"r": "🪨 Камень", "s": "✌️ Ножницы", "p": "📄 Бумага"}
+RPS_BEATS = {"r": "s", "s": "p", "p": "r"}
+COIN = {"h": "🦅 Орёл", "t": "🪙 Решка"}
+
+
+def gb(chat_id: int, action: str, arg: str = "") -> str:
+    return f"g:{chat_id}:{action}" + (f":{arg}" if arg else "")
+
+
+def other(role: str) -> str:
+    return "p" if role == "o" else "o"
+
+
+def g_name(g: dict, role: str) -> str:
+    return g["o"] if role == "o" else g["p"]
+
+
+async def owner_name(conn_id: str) -> str:
+    if conn_id not in state["names"]:
+        conn = await bot.get_business_connection(conn_id)
+        state["names"][conn_id] = conn.user.first_name or "Я"
+        touch()
+    return state["names"][conn_id]
+
+
+def g_render(g: dict):
+    """Текст и кнопки игры в её текущем состоянии."""
+    k, c, o, p = g["kind"], g["chat"], g["o"], g["p"]
+    invite = [[("✅ Принять вызов", gb(c, "accept"))]]
+    if k == "flip":
+        return (f"🪙 Орёл или Решка\n{o} бросает монету, {p} угадывает.\n\n{p}, выбирай сторону!",
+                [[(COIN["h"], gb(c, "pick", "h")), (COIN["t"], gb(c, "pick", "t"))]])
+    if k == "rps":
+        mark = lambda r: "✅" if g["c"][r] else "⏳"
+        return (f"✊ Камень, ножницы, бумага\n{o} {mark('o')}  vs  {p} {mark('p')}\n\n"
+                "Результат откроется, когда выберут оба.",
+                [[(RPS_BTN[x], gb(c, "pick", x)) for x in "rsp"]])
+    if k == "xox":
+        if g["state"] == "invite":
+            return f"❌⭕ Крестики-нолики\n{o} бросает вызов {p}.\n\n{p}, нажми «Принять вызов»!", invite
+        rows = [[(g["board"][r * 3 + i] or "▫️", gb(c, "cell", str(r * 3 + i))) for i in range(3)]
+                for r in range(3)]
+        return (f"❌⭕ Крестики-нолики\n❌ {o}   ⭕ {p}\n\nХод: {SYM[g['turn']]} {g_name(g, g['turn'])}", rows)
+    if k == "revo":
+        if g["state"] == "invite":
+            return (f"🔫 Русская рулетка\n{o} бросает вызов {p}.\n"
+                    "В барабане 1 патрон из 6, стреляете в себя по очереди.\n\n"
+                    f"{p}, нажми «Принять вызов»!", invite)
+        chambers = "⚪" * g["shots"] + "🔘" * (6 - g["shots"])
+        return (f"🔫 Русская рулетка\n{o} vs {p}\n\n{g['log']}\n\nБарабан: {chambers}\n"
+                f"Ход: {g_name(g, g['turn'])}", [[("🔫 Выстрелить", gb(c, "shoot"))]])
+    if g["state"] == "invite":  # duel
+        return (f"🤠 Дуэль на реакцию\n{o} вызывает {p}.\n\nКогда кнопка станет зелёной — жми первым. "
+                f"Кто выстрелит раньше времени — рискует застрелиться сам.\n\n{p}, нажми «Принять вызов»!",
+                invite)
+    if g["state"] == "wait":
+        return (f"🤠 Дуэль: {o} vs {p}\n\n🔴 Ждите сигнала… Не стреляйте раньше времени!",
+                [[("🔴 Ждём…", gb(c, "fire"))]])
+    return f"🤠 Дуэль: {o} vs {p}\n\n🟢 СТРЕЛЯЙТЕ!", [[("🟢 ОГОНЬ!", gb(c, "fire"))]]
+
+
+async def g_edit(g: dict, text: str, rows=None):
+    await bot.edit_message_text(
+        text, business_connection_id=g["conn"], chat_id=g["chat"], message_id=g["mid"],
+        reply_markup=markup(rows) if rows else None,
+    )
+
+
+async def g_finish(g: dict, text: str, rows=None):
+    g["over"] = True
+    if games.get(g["chat"]) is g:
+        del games[g["chat"]]
+    if g.get("task"):
+        g["task"].cancel()
+    await g_edit(g, text, rows)
+
+
+async def g_start(message: Message, owner_id: int, kind: str):
+    conn_id, chat_id = message.business_connection_id, message.chat.id
+    await delete_msgs(conn_id, [message.message_id])
+    old = games.pop(chat_id, None)
+    if old:
+        old["over"] = True
+        if old.get("task"):
+            old["task"].cancel()
+    g = {"kind": kind, "conn": conn_id, "chat": chat_id, "owner": owner_id,
+         "o": await owner_name(conn_id), "p": who_of(message.chat),
+         "state": "invite", "over": False, "lock": asyncio.Lock()}
+    if kind == "rps":
+        g["c"] = {"o": None, "p": None}
+    if kind == "xox":
+        g["board"], g["turn"] = [""] * 9, "o"
+    text, rows = g_render(g)
+    try:
+        m = await send(conn_id, chat_id, text, reply_markup=markup(rows), keep=True)
+    except Exception as e:
+        log.warning("игра: кнопки не отправились: %s", e)
+        if kind == "flip":  # монетке кнопки не обязательны
+            await send(conn_id, chat_id, f"🪙 Выпало: {COIN[random.choice('ht')]}", keep=True)
+        else:
+            await notify(owner_id, f"⚠️ Telegram не принял кнопки в этом чате, игра .{kind} не запущена: {e}")
+        return
+    g["mid"] = m.message_id
+    games[chat_id] = g
+
+
+async def duel_arm(g: dict):
+    """Через случайное время кнопка дуэли «зеленеет»."""
+    try:
+        await asyncio.sleep(random.uniform(3, 8))
+        async with g["lock"]:
+            if g["over"]:
+                return
+            g["state"], g["t0"] = "fire", time.monotonic()
+            text, rows = g_render(g)
+            await g_edit(g, text, rows)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception("ошибка дуэли")
+
+
+async def g_action(cb: CallbackQuery, g: dict, role: str, action: str, arg: str):
+    k, name = g["kind"], g_name(g, role)
+
+    if action == "accept":
+        if role != "p":
+            return await cb.answer("Ждём, пока соперник примет вызов")
+        if k == "xox":
+            g["state"] = "play"
+        elif k == "revo":
+            g.update(state="play", bullet=random.randint(0, 5), shots=0,
+                     turn=random.choice("op"), log="Барабан прокручен.")
+        elif k == "duel":
+            g["state"] = "wait"
+            g["task"] = asyncio.create_task(duel_arm(g))
+        text, rows = g_render(g)
+        await g_edit(g, text, rows)
+        return await cb.answer()
+
+    if k == "flip" and action == "pick":
+        if role != "p":
+            return await cb.answer(f"Выбирает {g['p']}")
+        coin = random.choice("ht")
+        verdict = "угадал(а) 🎉" if coin == arg else "не угадал(а) 😅"
+        await g_finish(g, f"🪙 Выпало: {COIN[coin]}\n{g['p']} выбрал(а) {COIN[arg]} — {verdict}")
+        return await cb.answer()
+
+    if k == "rps" and action == "pick" and arg in RPS_NAMES:
+        if g["c"][role]:
+            return await cb.answer("Ты уже сделал выбор")
+        g["c"][role] = arg
+        await cb.answer(f"Ты выбрал: {RPS_NAMES[arg]}")
+        co, cp = g["c"]["o"], g["c"]["p"]
+        if not (co and cp):
+            text, rows = g_render(g)
+            return await g_edit(g, text, rows)
+        if co == cp:
+            res = "🤝 Ничья!"
+        else:
+            res = f"🏆 Победил {g['o'] if RPS_BEATS[co] == cp else g['p']}!"
+        return await g_finish(
+            g, f"✊ Камень, ножницы, бумага\n{g['o']}: {RPS_NAMES[co]}\n{g['p']}: {RPS_NAMES[cp]}\n\n{res}")
+
+    if k == "xox" and action == "cell" and g["state"] == "play":
+        i = int(arg)
+        if role != g["turn"]:
+            return await cb.answer("Сейчас не твой ход")
+        if g["board"][i]:
+            return await cb.answer("Клетка занята")
+        g["board"][i] = SYM[role]
+        b = g["board"]
+        win = any(b[x] and b[x] == b[y] == b[z] for x, y, z in XOX_LINES)
+        if win or all(b):
+            head = f"🏆 Победил {SYM[role]} {name}!" if win else "🤝 Ничья!"
+            rows = [[(b[r * 3 + j] or "▫️", "g:0:noop") for j in range(3)] for r in range(3)]
+            await g_finish(g, f"❌⭕ Крестики-нолики\n{head}", rows)
+        else:
+            g["turn"] = other(role)
+            text, rows = g_render(g)
+            await g_edit(g, text, rows)
+        return await cb.answer()
+
+    if k == "revo" and action == "shoot" and g["state"] == "play":
+        if role != g["turn"]:
+            return await cb.answer("Сейчас не твой ход")
+        if g["shots"] == g["bullet"]:
+            await g_finish(g, f"🔫 Русская рулетка\n\n💥 БАХ! {name} не повезло.\n"
+                              f"🏆 Победил {g_name(g, other(role))}!")
+        else:
+            g["shots"] += 1
+            g["turn"] = other(role)
+            g["log"] = f"🔫 {name}: щёлк… пусто. Ход переходит к {g_name(g, g['turn'])}."
+            text, rows = g_render(g)
+            await g_edit(g, text, rows)
+        return await cb.answer()
+
+    if k == "duel" and action == "fire":
+        if g["state"] == "wait":
+            if random.random() < 0.5:
+                await g_finish(g, f"🤠 Дуэль\n\n💥 {name} выстрелил раньше времени и застрелился!\n"
+                                  f"🏆 Победил {g_name(g, other(role))}!")
+                return await cb.answer()
+            return await cb.answer("Рано! Тебе повезло — осечка. Жди зелёного!", show_alert=True)
+        if g["state"] == "fire":
+            ms = int((time.monotonic() - g["t0"]) * 1000)
+            await g_finish(g, f"🤠 Дуэль\n\n🏆 {name} выстрелил первым!\n⏱ ≈ {ms} мс")
+        return await cb.answer()
+
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("g:"))
+async def on_game(cb: CallbackQuery):
+    try:
+        _, raw_chat, action, *rest = cb.data.split(":")
+        chat_id = int(raw_chat)
+    except ValueError:
+        return await cb.answer()
+    if action == "noop":
+        return await cb.answer()
+    g = games.get(chat_id)
+    if not g or g["over"]:
+        return await cb.answer("Эта игра уже закончилась", show_alert=True)
+    uid = cb.from_user.id
+    if uid not in (g["owner"], chat_id):
+        return await cb.answer()
+    role = "o" if uid == g["owner"] else "p"
+    async with g["lock"]:
+        if g["over"]:
+            return await cb.answer("Эта игра уже закончилась", show_alert=True)
+        try:
+            await g_action(cb, g, role, action, rest[0] if rest else "")
+        except Exception:
+            log.exception("ошибка в игре")
+            await cb.answer("Что-то пошло не так")
+
+
+# ---------------------------------------------------------------- серия (streak)
+def _today(conn_id: str):
+    cfg = state["time"].get(conn_id)
+    return datetime.now(ZoneInfo(cfg["tz"] if cfg else os.getenv("STREAK_TZ", "UTC"))).date()
+
+
+def _streak(st: dict) -> dict:
+    s = st.setdefault("streak", {})
+    for key, val in (("on", False), ("count", 0), ("best", 0), ("dead", False), ("lost", 0),
+                     ("pet", False), ("me", False), ("them", False), ("restores", {})):
+        s.setdefault(key, val)
+    return s
+
+
+def sb(chat_id: int, action: str) -> str:
+    return f"s:{chat_id}:{action}"
+
+
+def streak_tick(conn_id: str, chat_id: int, who: str):
+    """Учитывает сообщение («me» — твоё, «them» — собеседника). Возвращает текст события или None."""
+    s = chat_state(conn_id, chat_id).get("streak")
+    if not s or not s.get("on"):
+        return None
+    today = _today(conn_id)
+    d, event = today.isoformat(), None
+    if s.get("day") != d:
+        if s["count"] > 0 and s.get("last") not in (d, (today - timedelta(days=1)).isoformat()):
+            s["lost"], s["count"], s["dead"] = s["count"], 0, True
+            event = f"💀 Серия {s['lost']} дн. умерла. Открой .streak, чтобы восстановить."
+        s["day"], s["me"], s["them"] = d, False, False
+    s[who] = True
+    if s["me"] and s["them"] and s.get("last") != d:
+        if s["dead"]:  # серию не восстановили — начинается новая
+            s["dead"], s["count"] = False, 0
+        s["count"] += 1
+        s["last"] = d
+        s["best"] = max(s["best"], s["count"])
+        event = f"🔥 Серия: {s['count']} дн." + (" 👁" if s["pet"] else "")
+    touch()
+    return event
+
+
+async def streak_event(conn_id: str, chat_id: int, who: str):
+    ev = streak_tick(conn_id, chat_id, who)
+    if ev:
+        try:
+            await send(conn_id, chat_id, ev, keep=True)
+        except Exception as e:
+            log.warning("серия: не удалось написать в чат: %s", e)
+
+
+def streak_render(conn_id: str, chat_id: int, who: str):
+    s = _streak(chat_state(conn_id, chat_id))
+    today = _today(conn_id)
+    left = max(0, 5 - s["restores"].get(today.strftime("%Y-%m"), 0))
+    if s["dead"]:
+        line = f"💀 Серия умерла (было {s['lost']} дн.)"
+    elif s["on"]:
+        line = f"🔥 {s['count']} дн."
+    else:
+        line = "⏸ выключена"
+    fresh = s.get("day") == today.isoformat()
+    me, them = ("✅" if fresh and s["me"] else "⏳"), ("✅" if fresh and s["them"] else "⏳")
+    if not s["pet"]:
+        pet = "нет"
+    elif s["dead"]:
+        pet = "💀 Глазик умер — восстанови серию"
+    else:
+        pet = f"👁 Глазик, уровень {1 + s['count'] // 7}"
+    text = (f"🔥 Серия с {who}\n\n{line}\nРекорд: {s['best']} дн.\n"
+            f"Сегодня: я {me}   {who} {them}\n\n🐣 Питомец: {pet}\n"
+            f"♻️ Восстановлений в этом месяце: {left} из 5")
+    rows = [[("🔴 Выключить серию" if s["on"] else "🟢 Включить серию", sb(chat_id, "toggle"))]]
+    if not s["pet"]:
+        rows.append([("👁 Создать глазика", sb(chat_id, "pet"))])
+    if s["dead"] and left > 0:
+        rows.append([("♻️ Восстановить серию", sb(chat_id, "restore"))])
+    rows.append([("🔄 Обновить", sb(chat_id, "refresh"))])
+    return text, rows
+
+
+async def streak_menu(message: Message, owner_id: int):
+    conn_id, chat_id = message.business_connection_id, message.chat.id
+    st = chat_state(conn_id, chat_id)
+    st["who"] = who_of(message.chat)
+    touch()
+    await delete_msgs(conn_id, [message.message_id])
+    text, rows = streak_render(conn_id, chat_id, st["who"])
+    try:
+        await send(conn_id, chat_id, text, reply_markup=markup(rows), keep=True)
+    except Exception as e:
+        log.warning("серия: кнопки в чат не отправились (%s)", e)
+        await bot.send_message(owner_id, text, reply_markup=markup(rows))
+
+
+@dp.callback_query(F.data.startswith("s:"))
+async def on_streak(cb: CallbackQuery):
+    try:
+        _, raw_chat, action = cb.data.split(":")
+        chat_id = int(raw_chat)
+    except ValueError:
+        return await cb.answer()
+    msg = cb.message
+    conn_id = getattr(msg, "business_connection_id", None) if msg else None
+    if not conn_id:
+        conn_id = next((k.rsplit(":", 1)[0] for k in state["chats"] if k.endswith(f":{chat_id}")), None)
+    if not conn_id:
+        return await cb.answer("Не нашёл этот чат", show_alert=True)
+    if cb.from_user.id != await get_owner(conn_id):
+        return await cb.answer("Меню серии доступно только владельцу", show_alert=True)
+
+    st = chat_state(conn_id, chat_id)
+    s = _streak(st)
+    today = _today(conn_id)
+    note = None
+    if action == "toggle":
+        s["on"] = not s["on"]
+        if s["on"]:
+            s["day"] = None
+        note = "Серия включена" if s["on"] else "Серия выключена"
+    elif action == "pet":
+        s["pet"] = True
+        note = "👁 Глазик создан!"
+    elif action == "restore":
+        month = today.strftime("%Y-%m")
+        used = s["restores"].get(month, 0)
+        if not s["dead"]:
+            note = "Серия и так жива"
+        elif used >= 5:
+            return await cb.answer("В этом месяце восстановления закончились", show_alert=True)
+        else:
+            s["restores"][month] = used + 1
+            both = s.get("day") == today.isoformat() and s["me"] and s["them"]
+            s["dead"] = False
+            s["count"] = s["lost"] + (1 if both else 0)
+            s["last"] = today.isoformat() if both else (today - timedelta(days=1)).isoformat()
+            s["best"] = max(s["best"], s["count"])
+            note = "♻️ Серия восстановлена!"
+    touch()
+
+    text, rows = streak_render(conn_id, chat_id, st.get("who", "собеседник"))
+    if msg:
+        try:
+            if getattr(msg, "business_connection_id", None):
+                await bot.edit_message_text(
+                    text, business_connection_id=conn_id, chat_id=msg.chat.id,
+                    message_id=msg.message_id, reply_markup=markup(rows))
+            else:
+                await msg.edit_text(text, reply_markup=markup(rows))
+        except Exception as e:
+            log.info("меню серии не обновлено: %s", e)
+    await cb.answer(note)
 
 
 # /help прямо в чате с самим ботом

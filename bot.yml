@@ -1,0 +1,52 @@
+name: Telegram bot 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"   # страховка: если цепочка перезапусков оборвалась
+
+# одновременно работает только один экземпляр, следующий ждёт в очереди
+concurrency:
+  group: tg-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run bot (5ч 40м, потом штатно завершается)
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          DEV_ID: ${{ secrets.DEV_ID }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: timeout -s TERM 20400 python main.py || true
+
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "tg-bot"
+          git config user.email "tg-bot@users.noreply.github.com"
+          git add state.enc || true
+          git commit -m "state" || true
+          git pull --rebase || true
+          git push || true
+
+      - name: Restart itself
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bot.yml
